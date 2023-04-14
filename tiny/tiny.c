@@ -243,5 +243,7 @@ int main(int argc, char **argv) {
     printf("Accepted connection from (%s, %s)\n", hostname, port);
     doit(connfd);   // line:netp:tiny:doit 트랜잭션 수행
     Close(connfd);  // line:netp:tiny:close 소켓 닫기
+
+    //test
   }
 }
