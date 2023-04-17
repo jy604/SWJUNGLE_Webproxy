@@ -48,13 +48,9 @@ void doit(int fd) {
   char *srcp, *lengptr, filename[MAXLINE], cgiargs[MAXLINE];
   struct stat sbuf; // 요청 받은 파일의 상태 정보 담는 구조체 선언
   char request_buf[MAXLINE], response_buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+  char hostname[MAXLINE], port[MAXLINE], path[MAXLINE]; 
   rio_t request_rio, response_rio;
- 
-  if ((serverfd = Open_clientfd("44.202.245.219", "8000")) < 0) {
-    printf("proxy 연결안됨\n");
-    return;
-  }
-  printf("proxy 연결됨\n");
+
 
   // client >>>>>>>>>>>>> proxy 클라이언트의 요청을 수신함 : 요청 라인 읽기
   Rio_readinitb(&request_rio, fd); // 클라이언트로부터 받은 데이터를 처리할 준비함
@@ -62,6 +58,14 @@ void doit(int fd) {
   printf("--------FROM CLIENT----------\n");
   printf("Request line::: %s", request_buf);
   sscanf(request_buf, "%s %s %s", method, uri, version); //Parsing
+  parse_uri(uri, hostname, port, path);
+  sprintf(request_buf, "%s %s %s\r\n", method, path, "HTTP/1.0");
+   printf("host ::::::::::::::: HOSTNAME: %s PORT: %s\n", hostname, port);
+  if ((serverfd = Open_clientfd(hostname, port)) < 0) {
+    printf("proxy 연결안됨\n");
+    return;
+  }
+  printf("proxy 연결됨\n");
   Rio_writen(serverfd, request_buf, strlen(request_buf));
 
   if (strcasecmp(method, "GET")) {
@@ -70,6 +74,8 @@ void doit(int fd) {
     return;
   }
   //read_requesthdrs(&rio); // 아니라면 값을 받아들이고, 다른 요청 헤더를 무시
+ 
+
 
   printf("Request headers:::\n"); //요청 헤더 출력
   Rio_readlineb(&request_rio, request_buf, MAXLINE); // rp에서 최대 maxline만큼 바이트를 읽어 buf에 저장
@@ -151,27 +157,19 @@ void read_requesthdrs(rio_t *rp) {
 }
 // uri 형태: `http://hostname:port/path` 혹은 `http://hostname/path` (port는 optional)
 int parse_uri(char *uri, char *hostname, char *port, char *path) {
-  char *hostptr = strstr(uri, "//"); 
-  char *portptr = strchr(hostptr, ':');
-  // if (!strstr(uri, "cgi-bin")) { /* Static content - 정적 !(0) */
-  //   strcpy(cgiargs, ""); // cgiargs에 빈문자열 복사 = 없애버림
-  //   strcpy(filename, "."); // filename에 . 복사
-  //   strcat(filename, uri); // .뒤에 uril 붙여 넣음 .'/index.html'를 만들기 위함
-  //   if (uri[strlen(uri) - 1] == '/') // 만일 문자가 '/'로 끝난다면
-  //       strcat(filename, "home.html"); //기본 파일 이름을 추가함
-  //   return 1;
-  // }
-  // else { /* Dynamic content - 동적 */
-  //   ptr = index(uri, '?'); // ?는 인자 구분하는 것, uri에 있는 ?의 위치부터 모든 CGI 인자를 추출 
-  //   if (ptr) { // ? 가 존재하면
-  //       strcpy(cgiargs, ptr + 1); // cgiargs 값에 ? 그 다음 값(ptr+1)을 넣어줌
-  //       *ptr = '\0'; // 해당 ptr은 NULL로 변경
-  //   }
-  //   else { // ?가 없다면
-  //       strcpy(cgiargs, ""); //cgiargs가 없음 > cgiargs를 지움 
-  //   strcpy(filename, "."); // filename을 .으로 바꾸고
-  //   strcat(filename, uri); // .뒤에 uri 붙여서 형태를 만들어줌
-  //   return 0;
-  //   }
-  // }
+  char *host_ptr = strstr(uri, "//") != NULL ? strstr(uri, "//") + 2 : uri; // http:// 자름 hostname:port/path
+  char *port_ptr = strchr(host_ptr, ':'); // port 시작 위치 port/path
+  char *path_ptr = strchr(host_ptr, '/'); // path 시작 위치 port/path
+
+  if (port_ptr != NULL) {// 포트가 있는 경우
+    strncpy(port, port_ptr + 1, path_ptr - port_ptr - 1);
+    port[path_ptr - port_ptr - 1] = '\0';
+    strncpy(hostname, host_ptr, port_ptr - host_ptr); // hostname 구하기
+  }
+  else {   // 포트가 없는 경우
+    strcpy(port, "80");                                               
+  strncpy(hostname, host_ptr, path_ptr - host_ptr);
+  }
+  strcpy(path, path_ptr);
+  return;
 }
