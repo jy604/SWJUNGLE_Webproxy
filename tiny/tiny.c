@@ -1,3 +1,4 @@
+
 /* $begin tinymain */
 /*
  * tiny.c - A simple, iterative HTTP/1.0 Web server that uses the
@@ -13,9 +14,9 @@ void read_requesthdrs(rio_t *rp); // 클라이언트로부터 수신한 HTTP 요
 // 클라이언트가 요청한 URI에서 파일 경로와 CGI 인자 추출
 // 동적 CGI를 요청한 경우 : 파일 경로와 CGI 인자 모두 추출
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize); // 정적 파일을 클라이언트로 전송
+void serve_static(int fd, char *filename, int filesize, char *method); // 정적 파일을 클라이언트로 전송
 void get_filetype(char *filename, char *filetype); // 파일의 확장자를 기반으로 해당 파일의 MIME 타입 결정
-void serve_dynamic(int fd, char *filename, char *cgiargs); // 동적 CGI 프로그램을 실행, 클라이언트로 결과 전송
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method); // 동적 CGI 프로그램을 실행, 클라이언트로 결과 전송
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg); // 클라이언트 에러 처리, HTTP 에러 응답 생성, 해당 응답을 클라이언트에게 전송함
 
@@ -39,7 +40,7 @@ void doit(int fd) {
   // buf : 파싱할 대상 문자열 공백으로 구분하여 3개(%s)의 문자열로 파싱-> method, uri, version에 파싱 결과 저장
   // buf = GET /index.html HTTP/1.1 method : "GET" / uri : "/index.html" version : "HTTP/1.1"
   // 메소드 에러 처리 : tiny는 GET method만 지원, 다른 method 요청하면 에러메시지(501) 보내고, main으로 돌아감
-  if (strcasecmp(method, "GET")) {
+  if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")) {
     clienterror(fd, method, "501", "Not implemented",
                 "Tiny does not implement this method");
     return;
@@ -49,6 +50,7 @@ void doit(int fd) {
   // parse URI from GET request : uri를 파싱해서 파일 이름과 CGI인자를 추출, 
   // 요청이 정적, 동적인지 구분하는 플래그 설정
   is_static = parse_uri(uri, filename, cgiargs);
+  printf("static : %d\n", is_static);
   // parse_uri를 통해서 인자가 있는지 확인하고 있으면 있는대로 없으면 없는대로 uri를 재정리해줌 > 정적 1 동적 0 return
   /* stat() : 파일의 메타정보를 검색하는 함수 sys/stat.h에 선언 filename 인자로 전달 > 파일의 정보를 구조체로 채워 포인터로 전달
   stat()는 파일 유형, 권한, 소유자, 수정 시간을 알려줌, 호출 성공시 0 / 실패 시 -1을 return errno변수에 오류 코드 저장됨*/
@@ -68,7 +70,7 @@ void doit(int fd) {
                   "Tiny couldn't read the file");
       return;
     }
-    serve_static(fd, filename, sbuf.st_size); // 정적 콘텐츠 클라이언트에게 제공
+    serve_static(fd, filename, sbuf.st_size, method); // 정적 콘텐츠 클라이언트에게 제공
   }
   else { /* Serve dynamic content = request가 동적 컨텐츠라면*/
   // 일반 파일인지 검증 || S_IXUSR : 실행 권한 여부 검사
@@ -77,7 +79,7 @@ void doit(int fd) {
                   "Tiny couldn't run the CGI program");
       return;
     }
-    serve_dynamic(fd, filename, cgiargs); // 동적 컨텐츠 클라이언트에게 제공
+    serve_dynamic(fd, filename, cgiargs, method); // 동적 컨텐츠 클라이언트에게 제공
   }
 }
 
@@ -121,7 +123,7 @@ void read_requesthdrs(rio_t *rp) {
 // strcpy(char* dest, const char* src) dest에 src 복사
 int parse_uri(char *uri, char *filename, char *cgiargs) {
   char *ptr;
-
+  printf("uriiiiiiiii: %s\n", uri);
   if (!strstr(uri, "cgi-bin")) { /* Static content - 정적 !(0) */
     strcpy(cgiargs, ""); // cgiargs에 빈문자열 복사 = 없애버림
     strcpy(filename, "."); // filename에 . 복사
@@ -137,16 +139,16 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
         *ptr = '\0'; // 해당 ptr은 NULL로 변경
     }
     else { // ?가 없다면
-        strcpy(cgiargs, ""); //cgiargs가 없음 > cgiargs를 지움 
+        strcpy(cgiargs, ""); //cgiargs가 없음 > cgiargs를 지움
+    }
     strcpy(filename, "."); // filename을 .으로 바꾸고
     strcat(filename, uri); // .뒤에 uri 붙여서 형태를 만들어줌
     return 0;
-    }
   }
 }
 
 // 정적 컨텐츠에서 사용하는 적합한 file type을 찾는 함수
-void serve_static(int fd, char *filename, int filesize) {
+void serve_static(int fd, char *filename, int filesize, char *method) {
   int srcfd;
   char *srcp, filetype[MAXLINE], buf[MAXBUF];
   // tiny는 5개의 서로 다른 정적 컨텐츠 타입 지원 : html, 무형식 텍스트, gif, png, jpeg으로 인코딩으로 된 영상
@@ -163,12 +165,18 @@ void serve_static(int fd, char *filename, int filesize) {
   printf("%s", buf); // 마지막으로 재확인
 
   /* Send response body to client - 요청한 파일의 내용을 fd(연결식별자)로 복사해서 응답 본체를 보냄 */
+  if (strcasecmp(method, "GET") == 0) {
+
   srcfd = Open(filename, O_RDONLY, 0); //filename open, 식별자 들고옴
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // 가상메모리에 파일 내용 매핑
+  // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // 가상메모리에 파일 내용 매핑
+  srcp = (char *)malloc(filesize);
+  Rio_readn(srcfd, srcp, filesize);
   Close(srcfd); // 메모리에 매핑한 후에는 식별자 필요 없음, 파일을 닫음 > 안 닫으면 누수
   Rio_writen(fd, srcp, filesize); // 실제로 파일을 클라이언트에게 전송
   //주소 srcp에서 시작하는 filesize 바이트를 클라이언트 연결 식별자로 복사
-  Munmap(srcp, filesize); // 매핑된 가상 메모리 주소를 반환 > 메모리 누수를 위해 필수
+  // Munmap(srcp, filesize); // 매핑된 가상 메모리 주소를 반환 > 메모리 누수를 위해 필수
+  free(srcp);
+ }
 }
 
   /*
@@ -184,6 +192,9 @@ void serve_static(int fd, char *filename, int filesize) {
       strcpy(filetype, "image/png");
   else if (strstr(filename, ".jpg"))
       strcpy(filetype, "image/jpeg");
+  // 숙제문제 11.7 mp4
+  // else if (strstr(filename, ".mp4"))
+  //     strcpy(filetype, "video/mp4");
   else
       strcpy(filetype, "text/plain");
  }
@@ -193,19 +204,23 @@ void serve_static(int fd, char *filename, int filesize) {
 /* Tiny는 child process를 fork 하고, 
 CGI 프로그램을 자식의 context에서 실행하며, 
 모든 종류의 동적 콘텐츠를 제공 */
-void serve_dynamic(int fd, char *filename, char *cgiargs) {
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method) {
   char buf[MAXLINE], *emptylist[] = { NULL };
-
+  printf("한글\n");
   /* Return first part of HTTP response */
   sprintf(buf, "HTTP/1.0 200 OK\r\n"); // 성공 응답라인으로 시작
   Rio_writen(fd, buf, strlen(buf));
   sprintf(buf, "Server: Tiny Web Server\r\n");
   Rio_writen(fd, buf, strlen(buf));
 
+  // if (!strcasecmp(method, "HEAD")) // 같으면 0(false). 다를 때 if문 안으로 들어감
+  //  return; // void 타입이라 바로 리턴해도 됨(끝내라)
+
   if (Fork() == 0) { /* Child - 응답 첫번째 보낸 후 새로운 자식 fork */
   /* Real server would set all CGI vars here */
 
   setenv("QUERY_STRING", cgiargs, 1); // QUERY_STRING 환경 변수를 요청하면 uri의 cgi인자들이 초기화
+  setenv("REQUEST_METHOD",method, 1);
   Dup2(fd, STDOUT_FILENO);      /* Redirect stdout to client - 자식은 자식의 표준 출력을 연결 파일 식별자로 재지정 */
   /*
     dup2는 newfd 파일 descripter가 이미 open된 파일이면 close하고 oldfd를 newfd로 복사함
