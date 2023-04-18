@@ -8,8 +8,8 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp); // 클라이언트로부터 수신한 HTTP 요청 헤더를 읽음
 int parse_uri(char *uri, char *hostname, char *port, char *path);
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
-char *longmsg); // 클라이언트 에러 처리, HTTP 에러 응답 생성, 해당 응답을 클라이언트에게 전송함
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void *thread(void *vargp);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -18,30 +18,39 @@ static const char *user_agent_hdr =
 
 int main(int argc, char **argv) {
   printf("%s", user_agent_hdr);
-  int listenfd, connfd; // 듣기 소켓, 연결 소켓 초기화
+  int listenfd, *connfd; // 듣기 소켓, 연결 소켓 초기화
   char hostname[MAXLINE], port[MAXLINE];
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
+  pthread_t tid;
 
   /* Check command line args */
   if (argc != 2) { // port 입력 안되면 에러
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
     exit(1);
   }
-// ./webserver 8080 -> argv[0] : ./webserver argv[1] : 8080
+// ./webserver 8080 -> argv[0] : ./webserver / argv[1] : 8080
   listenfd = Open_listenfd(argv[1]); // 인자로 port 번호를 받아 듣기 소켓 생성함
   while (1) {
     clientlen = sizeof(clientaddr); // 클라이언트의 소켓 주소를 저장할 구조체의 크기 계산
-    connfd = Accept(listenfd, (SA *)&clientaddr,&clientlen);  
-    // line:netp:tiny:accept 클라이언트의 연결 요청을 수락, 통신할 소켓 생성
-    // &clientaddr <- 클라이언트의 소켓 주소를 저장할 포인터 전달
+    connfd = Malloc(sizeof(int));
+    *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);  
     Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE,0); // 클라이언트의 ip주소와 포트번호 추출
     printf("Accepted connection from (%s, %s)\n", hostname, port);
-    doit(connfd);   // line:netp:tiny:doit 트랜잭션 수행
-    Close(connfd);  // line:netp:tiny:close 소켓 닫기
+    Pthread_create(&tid, NULL, thread, connfd);
+    // doit(connfd);   // line:netp:tiny:doit 트랜잭션 수행
+    // Close(connfd);  // line:netp:tiny:close 소켓 닫기
   }
 }
 
+void *thread(void *vargp) {
+  int connfd = *((int *)vargp);
+  Pthread_detach(pthread_self()); // 명시적 반환 x, 연결 종료시 자동으로 메모리 반환
+  Free(vargp); // main에서 malloc한 부분을 free
+  doit(connfd);
+  Close(connfd);
+  return NULL;
+}
 
 void doit(int fd) {
   int serverfd;
