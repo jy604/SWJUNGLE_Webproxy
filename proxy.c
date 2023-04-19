@@ -9,13 +9,13 @@ typedef struct web_object {
   char *response_ptr; // 버퍼의 주소
   struct web_object *prev;
   struct web_object *next;
-  int content_length;
+  size_t content_length;
   char path[MAXLINE];
 } web_object_t;
 
 web_object_t *root_ptr; // 캐시 리스트의 루트
 web_object_t *last_ptr;
-int total_cache_size = 0;
+size_t total_cache_size = 0;
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
