@@ -9,14 +9,20 @@ typedef struct web_object {
   char *response_ptr; // 버퍼의 주소
   struct web_object *prev;
   struct web_object *next;
-  size_t content_length;
+  int content_length;
   char path[MAXLINE];
 } web_object_t;
 
 web_object_t *root_ptr; // 캐시 리스트의 루트
 web_object_t *last_ptr;
-size_t total_cache_size = 0;
+int total_cache_size = 0;
 
+/* You won't lose style points for including this long line in your code */
+static const char *user_agent_hdr =
+    "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 "
+    "Firefox/10.0.3\r\n";
+
+// 함수 원형 선언
 void doit(int fd);
 void read_requesthdrs(rio_t *rp); // 클라이언트로부터 수신한 HTTP 요청 헤더를 읽음
 int parse_uri(char *uri, char *hostname, char *port, char *path);
@@ -27,10 +33,7 @@ void send_cache(web_object_t *web_object, int fd);
 void read_cache(web_object_t *web_object);
 void write_cache(web_object_t *web_object);
 
-/* You won't lose style points for including this long line in your code */
-static const char *user_agent_hdr =
-    "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 "
-    "Firefox/10.0.3\r\n";
+
 
 int main(int argc, char **argv) {
   printf("%s", user_agent_hdr);
@@ -45,7 +48,6 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
     exit(1);
   }
-
 
   root_ptr = (web_object_t *)calloc(1, sizeof(web_object_t));
   listenfd = Open_listenfd(argv[1]); // 인자로 port 번호를 받아 듣기 소켓 생성함
@@ -77,7 +79,7 @@ void doit(int fd) {
   rio_t request_rio, response_rio;
 
 
-  // client >>>>>>>>>>>>> proxy 클라이언트의 요청을 수신함 : 요청 라인 읽기
+  // 요청 라인 읽기 client >>>>>>>>>>>>> proxy 클라이언트의 요청을 수신함
   Rio_readinitb(&request_rio, fd); // 클라이언트로부터 받은 데이터를 처리할 준비함
   Rio_readlineb(&request_rio, request_buf, MAXLINE); // 클라이언트로부터 받은 HTTP요청을 버퍼에 저장
   printf("--------FROM CLIENT----------\n");
@@ -86,6 +88,8 @@ void doit(int fd) {
   parse_uri(uri, hostname, port, path);
   sprintf(request_buf, "%s %s %s\r\n", method, path, "HTTP/1.0");
   printf("host ::::::::::::::: HOSTNAME: %s PORT: %s\n", hostname, port);
+  printf("");
+
   web_object_t *cur_web_object = find_cache(path);
   if (cur_web_object != NULL) {// if 구조체 주소 있다면:
     send_cache(cur_web_object, fd); // 캐시 안에 데이터 읽어서 보내기
@@ -93,71 +97,73 @@ void doit(int fd) {
     return;
   }
 
-  // if ((serverfd = Open_clientfd(hostname, port)) < 0) {
-  if ((serverfd = Open_clientfd("44.202.245.219", "8000")) < 0) {
+  if (strcasecmp(method, "GET")) {
+    clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
+    return;
+  }
+
+  // server 소켓 생성
+  // if ((serverfd = Open_clientfd("44.202.245.219", "8000")) < 0) { // 브라우저 테스트용
+  if ((serverfd = Open_clientfd(hostname, port)) < 0) {
     printf("proxy 연결안됨\n");
     return;
   }
   printf("proxy 연결됨\n");
+
+  //요청 라인 전송 proxy >>>>>>>>>> server
   Rio_writen(serverfd, request_buf, strlen(request_buf));
 
-  if (strcasecmp(method, "GET")) {
-    clienterror(fd, method, "501", "Not implemented",
-                "Tiny does not implement this method");
-    return;
-  }
- //요청 헤더 출력
+// 요청 헤더 읽고, 출력
+// printf("Request headers:::\n"); // 구현 x
+  Rio_readlineb(&request_rio, request_buf, MAXLINE);
+  Rio_writen(serverfd, request_buf, strlen(request_buf));
   printf("Request headers:::\n");
-  Rio_readlineb(&request_rio, request_buf, MAXLINE); // rp에서 최대 maxline만큼 바이트를 읽어 buf에 저장
-  Rio_writen(serverfd, request_buf, strlen(request_buf));
-
-  while (strcmp(request_buf, "\r\n")) { // \r\n (CRLF)가 아닐때까지 반복 CRLF : 캐리지리턴, 라인피드
-    Rio_readlineb(&request_rio, request_buf, MAXLINE); // \r\n가 나올때까지 line을 읽으면서 복사
+  while (strcmp(request_buf, "\r\n")) { 
+    Rio_readlineb(&request_rio, request_buf, MAXLINE); 
     Rio_writen(serverfd, request_buf, strlen(request_buf));
     printf("%s", request_buf); // buf에 저장된 데이터 화면에 출력
   }
 
-  // server >>>>>>>>>>>>> proxy : 서버의 응답을 받음 : 응답 라인 읽기
+  // 응답 라인 읽기 : server >>>>>>>>>>>>> proxy
   Rio_readinitb(&response_rio, serverfd); // 응답 버퍼 초기화
   Rio_readlineb(&response_rio, response_buf, MAXLINE); // 라인 한 줄 읽기
-  Rio_writen(fd, response_buf, strlen(response_buf)); // 버퍼에 담은 라인 클라이언트(fd)한테 보내기
+  Rio_writen(fd, response_buf, strlen(response_buf)); // server >>>>> client 응답 라인 전송
   printf("--------TO CLIENT----------\n");
   printf("Response line::: %s", response_buf);
 
-// 헤더 안에서 body size 가져오기
-  printf("Response headers:::\n"); //응답 헤더 출력
-
-  int body_size;
-  while (strcmp(response_buf, "\r\n")) {
-    Rio_readlineb(&response_rio, response_buf, MAXLINE); // \r\n가 나올때까지 line을 읽으면서 복사
-    Rio_writen(fd, response_buf, strlen(response_buf));
+// 응답 헤더 읽기 : server >>>>>>> proxy
+  printf("Response headers:::\n");
+  int content_length;
+  while (strcmp(response_buf, "\r\n")) 
+  {
+    Rio_readlineb(&response_rio, response_buf, MAXLINE);
+    Rio_writen(fd, response_buf, strlen(response_buf)); // server >>>>> client 응답 헤더 전송
     if (strstr(response_buf, "Content-length") != 0) { //content=length가 버퍼 안에 있으면
     // 문자열 중에 숫자만 빼야함 Content-length: 183
       lengptr = strchr(response_buf, ':');
-      body_size = atoi(lengptr + 1);
-      printf("body_size : %d\n",body_size);
+      content_length = atoi(lengptr + 1);
+      printf("바디 길이 : %d\n",content_length);
     }
-    //
     printf("%s", response_buf); // buf에 저장된 데이터 화면에 출력
   }
 
-  if (body_size) {
-    srcp = malloc(body_size);
-    Rio_readnb(&response_rio, srcp, body_size);
-    if (body_size <= MAX_OBJECT_SIZE) {
+// 응답 바디 읽기 : server >>>>>>>>> proxy
+    srcp = malloc(content_length);
+    Rio_readnb(&response_rio, srcp, content_length);
+    if (content_length <= MAX_OBJECT_SIZE) 
+    {
       web_object_t *web_object = (web_object_t *)calloc(1, sizeof(web_object_t));
       web_object->response_ptr = srcp;
-      web_object->content_length = body_size;
-      // path 복사
-      strcpy(web_object->path, path);
+      web_object->content_length = content_length;
+      strcpy(web_object->path, path); // path 복사
       write_cache(web_object);
-      Rio_writen(fd, srcp, body_size);
-    } else {
-      Rio_writen(fd, srcp, body_size);
+      Rio_writen(fd, srcp, content_length); // 응답 바디 전송 : proxy >>>>> client
+    } 
+    else 
+    {
+      Rio_writen(fd, srcp, content_length);
       free(srcp);
     }
-  }
-
 }
 
 // 모든 실제 에러 처리 x, 명백한 에러는 체크함 
@@ -185,6 +191,7 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
 }
 // tiny는 요청 헤더 내의 어떠한 정보도 사용하지 않음 = 단순성, 안전성때문 > 헤더 읽고 걍 무시함
 
+// modify 적용 x, 사용 안함
 void read_requesthdrs(rio_t *rp) {
   char buf[MAXLINE];
 
@@ -216,8 +223,6 @@ int parse_uri(char *uri, char *hostname, char *port, char *path) {
 }
 
 web_object_t *find_cache(char *path) {
-  // path를 linked list에서 확인
-  // return 구조체 구조
   if (root_ptr -> content_length == 0) {/// 캐시에 들어있는 게 없으면
     return NULL;
   }
@@ -226,7 +231,6 @@ web_object_t *find_cache(char *path) {
     if(curr_ptr->next->content_length == 0) { // 다음 노드가 없으면
       return NULL;
     }
-
     if(strcmp(curr_ptr->next->path, path) == 0) { // 현재 들어온 path값이 캐시 안에 있으면
       return curr_ptr->next;
     }
@@ -245,6 +249,7 @@ char buf[MAXLINE];
   sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);
   sprintf(buf, "%sConnection: close\r\n", buf);// 연결 방식
   sprintf(buf, "%sContent-length: %d\r\n\r\n", buf, web_object->content_length); // 컨텐츠 길이
+  Rio_writen(fd, buf, strlen(buf));
   // HTTP 응답 메시지를 클라이언트에게 보냄
   Rio_writen(fd, web_object->response_ptr, web_object->content_length);
 }
@@ -252,26 +257,23 @@ char buf[MAXLINE];
 // 캐시 읽고, 쓰는 함수 (리스트 재배치)
 void read_cache(web_object_t *web_object) {
 // A > B > C
-// case 1: 캐시를 읽는데, 이미 그 전에 읽은 캐시가 현재 읽을 캐시일 경우
-// 그냥 반환
+// case 1: 캐시를 읽는데, 이미 그 전에 읽은 캐시가 현재 읽을 캐시일 경우 : 그냥 반환
 if (web_object == root_ptr) { 
   return;
 }
 // case 2: 현재 읽을 캐시가 B의 위치에 있고, 전, 후에 캐시가 다 있을 경우
-else {
-  if (web_object->next->content_length != 0) {
+if (web_object->next->content_length != 0) {
     web_object->prev->next = web_object->next; //현재 노드의 next가 현재 노드의 prev가 됨
     web_object->next->prev = web_object->prev; //현재 노드의 prev가 현재 노드의 next가 됨
     web_object->next = root_ptr; //루트 노드 바꾸기
     root_ptr = web_object;
-  }
+}
   // case3: 현재 노드가 마지막 노드일 경우
-  else { 
+else { 
     web_object->prev->next = NULL; // 현재 노드의 앞(prev) 노드의 next가 null
     web_object->next = root_ptr;
     root_ptr = web_object;
   }
-}
 }
 
 void write_cache(web_object_t *web_object) {
