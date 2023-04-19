@@ -5,11 +5,27 @@
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
+typedef struct web_object {
+  char *response_ptr; // 버퍼의 주소
+  struct web_object *prev;
+  struct web_object *next;
+  size_t content_length;
+  char path[MAXLINE];
+} web_object_t;
+
+web_object_t *root_ptr; // 캐시 리스트의 루트
+web_object_t *last_ptr;
+size_t total_cache_size = 0;
+
 void doit(int fd);
 void read_requesthdrs(rio_t *rp); // 클라이언트로부터 수신한 HTTP 요청 헤더를 읽음
 int parse_uri(char *uri, char *hostname, char *port, char *path);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 void *thread(void *vargp);
+web_object_t *find_cache(char *path);
+void send_cache(web_object_t *web_object, int fd);
+void read_cache(web_object_t *web_object);
+void write_cache(web_object_t *web_object);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -29,7 +45,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
     exit(1);
   }
-// ./webserver 8080 -> argv[0] : ./webserver / argv[1] : 8080
+
+
+  root_ptr = (web_object_t *)calloc(1, sizeof(web_object_t));
   listenfd = Open_listenfd(argv[1]); // 인자로 port 번호를 받아 듣기 소켓 생성함
   while (1) {
     clientlen = sizeof(clientaddr); // 클라이언트의 소켓 주소를 저장할 구조체의 크기 계산
@@ -38,8 +56,6 @@ int main(int argc, char **argv) {
     Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE,0); // 클라이언트의 ip주소와 포트번호 추출
     printf("Accepted connection from (%s, %s)\n", hostname, port);
     Pthread_create(&tid, NULL, thread, connfd);
-    // doit(connfd);   // line:netp:tiny:doit 트랜잭션 수행
-    // Close(connfd);  // line:netp:tiny:close 소켓 닫기
   }
 }
 
@@ -69,8 +85,16 @@ void doit(int fd) {
   sscanf(request_buf, "%s %s %s", method, uri, version); //Parsing
   parse_uri(uri, hostname, port, path);
   sprintf(request_buf, "%s %s %s\r\n", method, path, "HTTP/1.0");
-   printf("host ::::::::::::::: HOSTNAME: %s PORT: %s\n", hostname, port);
-  if ((serverfd = Open_clientfd(hostname, port)) < 0) {
+  printf("host ::::::::::::::: HOSTNAME: %s PORT: %s\n", hostname, port);
+  web_object_t *cur_web_object = find_cache(path);
+  if (cur_web_object != NULL) {// if 구조체 주소 있다면:
+    send_cache(cur_web_object, fd); // 캐시 안에 데이터 읽어서 보내기
+    read_cache(cur_web_object); // 읽은 캐시를 갱신
+    return;
+  }
+
+  // if ((serverfd = Open_clientfd(hostname, port)) < 0) {
+  if ((serverfd = Open_clientfd("44.202.245.219", "8000")) < 0) {
     printf("proxy 연결안됨\n");
     return;
   }
@@ -82,11 +106,8 @@ void doit(int fd) {
                 "Tiny does not implement this method");
     return;
   }
-  //read_requesthdrs(&rio); // 아니라면 값을 받아들이고, 다른 요청 헤더를 무시
- 
-
-
-  printf("Request headers:::\n"); //요청 헤더 출력
+ //요청 헤더 출력
+  printf("Request headers:::\n");
   Rio_readlineb(&request_rio, request_buf, MAXLINE); // rp에서 최대 maxline만큼 바이트를 읽어 buf에 저장
   Rio_writen(serverfd, request_buf, strlen(request_buf));
 
@@ -123,8 +144,18 @@ void doit(int fd) {
   if (body_size) {
     srcp = malloc(body_size);
     Rio_readnb(&response_rio, srcp, body_size);
-    Rio_writen(fd, srcp, body_size);
-    free(srcp);
+    if (body_size <= MAX_OBJECT_SIZE) {
+      web_object_t *web_object = (web_object_t *)calloc(1, sizeof(web_object_t));
+      web_object->response_ptr = srcp;
+      web_object->content_length = body_size;
+      // path 복사
+      strcpy(web_object->path, path);
+      write_cache(web_object);
+      Rio_writen(fd, srcp, body_size);
+    } else {
+      Rio_writen(fd, srcp, body_size);
+      free(srcp);
+    }
   }
 
 }
@@ -164,6 +195,7 @@ void read_requesthdrs(rio_t *rp) {
   }
   return;
 }
+
 // uri 형태: `http://hostname:port/path` 혹은 `http://hostname/path` (port는 optional)
 int parse_uri(char *uri, char *hostname, char *port, char *path) {
   char *host_ptr = strstr(uri, "//") != NULL ? strstr(uri, "//") + 2 : uri; // http:// 자름 hostname:port/path
@@ -181,4 +213,80 @@ int parse_uri(char *uri, char *hostname, char *port, char *path) {
   }
   strcpy(path, path_ptr);
   return;
+}
+
+web_object_t *find_cache(char *path) {
+  // path를 linked list에서 확인
+  // return 구조체 구조
+  if (root_ptr -> content_length == 0) {/// 캐시에 들어있는 게 없으면
+    return NULL;
+  }
+  // curr_ptr의 path와 path가 다를때까지 curr_ptr을 next로 옮기며 탐색
+  for(web_object_t *curr_ptr = root_ptr; strcmp(curr_ptr->path, path); curr_ptr = curr_ptr->next) {
+    if(curr_ptr->next->content_length == 0) { // 다음 노드가 없으면
+      return NULL;
+    }
+
+    if(strcmp(curr_ptr->next->path, path) == 0) { // 현재 들어온 path값이 캐시 안에 있으면
+      return curr_ptr->next;
+    }
+  }
+  return NULL;
+}
+
+// 캐시에 find_cache로 찾은 헤더의 정보가 담겨져있다면 해당 캐시를 바로 클라이언트에게 보내는 함수
+void send_cache(web_object_t *web_object, int fd) {
+// 응답 헤더 만들기
+// connfd에게 헤더 보내기
+// connfd에게 cache 내용 보내기
+rio_t rio;
+char buf[MAXLINE];
+  sprintf(buf, "HTTP/1.0 200 OK\r\n"); // 상태 라인 : errnum : 상태 코드, shortmsg : 상태 메시지
+  sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);
+  sprintf(buf, "%sConnection: close\r\n", buf);// 연결 방식
+  sprintf(buf, "%sContent-length: %d\r\n\r\n", buf, web_object->content_length); // 컨텐츠 길이
+  // HTTP 응답 메시지를 클라이언트에게 보냄
+  Rio_writen(fd, web_object->response_ptr, web_object->content_length);
+}
+
+// 캐시 읽고, 쓰는 함수 (리스트 재배치)
+void read_cache(web_object_t *web_object) {
+// A > B > C
+// case 1: 캐시를 읽는데, 이미 그 전에 읽은 캐시가 현재 읽을 캐시일 경우
+// 그냥 반환
+if (web_object == root_ptr) { 
+  return;
+}
+// case 2: 현재 읽을 캐시가 B의 위치에 있고, 전, 후에 캐시가 다 있을 경우
+else {
+  if (web_object->next->content_length != 0) {
+    web_object->prev->next = web_object->next; //현재 노드의 next가 현재 노드의 prev가 됨
+    web_object->next->prev = web_object->prev; //현재 노드의 prev가 현재 노드의 next가 됨
+    web_object->next = root_ptr; //루트 노드 바꾸기
+    root_ptr = web_object;
+  }
+  // case3: 현재 노드가 마지막 노드일 경우
+  else { 
+    web_object->prev->next = NULL; // 현재 노드의 앞(prev) 노드의 next가 null
+    web_object->next = root_ptr;
+    root_ptr = web_object;
+  }
+}
+}
+
+void write_cache(web_object_t *web_object) {
+  // 캐시 메모리 최대 크기보다 넘치면 가장 오래된 캐시 삭제
+  if ((web_object->content_length + total_cache_size) > MAX_CACHE_SIZE) {
+    int tmp = last_ptr->content_length;
+    last_ptr = last_ptr-> prev;
+    free(last_ptr->next);
+    last_ptr->next = NULL;
+    total_cache_size -= tmp;
+  }
+  if (root_ptr != NULL) {
+    web_object->next = root_ptr;
+    root_ptr->prev = web_object;
+  }
+  root_ptr = web_object;
+  total_cache_size += web_object->content_length;
 }
